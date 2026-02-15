@@ -31,7 +31,8 @@ impl<'a> MakeWriter<'a> for SlowWriter {
 }
 
 fn sampling_layer(budgets: &[(&str, u64)]) -> Dispatch {
-    let mut builder = SamplingLayer::builder()
+    let mut builder = SamplingLayer::<Registry>::builder()
+        .without_time()
         .bucket_duration(Duration::from_millis(50))
         .writer(SlowWriter);
     for &(filter, limit) in budgets {

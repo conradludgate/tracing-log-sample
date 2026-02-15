@@ -1,19 +1,18 @@
-use std::cell::Cell;
 use std::io::{self, Write};
+use std::marker::PhantomData;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use thread_local::ThreadLocal;
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
-use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
-use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::format::{DefaultFields, Format, Full};
+use tracing_subscriber::fmt::{self, FormatFields, MakeWriter};
 use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 
-use crate::TextFormat;
-use crate::format::FormatEvent;
+use crate::capture::{CaptureMakeWriter, return_captured, take_captured};
 use crate::reservoir::Reservoir;
 
 pub(crate) struct State {
@@ -59,15 +58,21 @@ impl Stats {
 
 /// A [`tracing_subscriber::Layer`] that samples events into time-bucketed reservoirs.
 ///
+/// Uses `tracing_subscriber::fmt::Layer` internally for event formatting.
 /// Construct via [`SamplingLayer::builder()`](crate::SamplingLayerBuilder).
-pub struct SamplingLayer<W: for<'a> MakeWriter<'a> = fn() -> io::Stderr, F = TextFormat> {
+pub struct SamplingLayer<
+    S,
+    N = DefaultFields,
+    E = Format<Full>,
+    W: for<'a> MakeWriter<'a> = fn() -> io::Stderr,
+> {
     pub(crate) filters: Vec<EnvFilter>,
     pub(crate) state: Mutex<State>,
     pub(crate) bucket_duration_ns: u64,
     pub(crate) writer: W,
-    pub(crate) formatter: F,
-    pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
+    pub(crate) fmt_layer: fmt::Layer<S, N, E, CaptureMakeWriter>,
     pub(crate) stats: Stats,
+    pub(crate) _subscriber: PhantomData<fn(S)>,
 }
 
 fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
@@ -78,7 +83,7 @@ fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
         / bucket_duration_ns
 }
 
-impl<W: for<'a> MakeWriter<'a>, F: FormatEvent> SamplingLayer<W, F> {
+impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
     fn drain_all(state: &mut State) -> Vec<Vec<u8>> {
         state
             .reservoirs
@@ -104,7 +109,7 @@ impl<W: for<'a> MakeWriter<'a>, F: FormatEvent> SamplingLayer<W, F> {
     }
 }
 
-impl<W: for<'a> MakeWriter<'a>, F> Drop for SamplingLayer<W, F> {
+impl<S, N, E, W: for<'a> MakeWriter<'a>> Drop for SamplingLayer<S, N, E, W> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             let events: Vec<Vec<u8>> = state
@@ -120,15 +125,17 @@ impl<W: for<'a> MakeWriter<'a>, F> Drop for SamplingLayer<W, F> {
     }
 }
 
-impl<S, W, F> Layer<S> for SamplingLayer<W, F>
+impl<S, N, E, W> tracing_subscriber::Layer<S> for SamplingLayer<S, N, E, W>
 where
-    S: Subscriber,
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+    E: fmt::FormatEvent<S, N> + 'static,
     W: for<'a> MakeWriter<'a> + 'static,
-    F: FormatEvent + 'static,
 {
     fn register_callsite(&self, meta: &'static Metadata<'static>) -> Interest {
         for filter in &self.filters {
-            let interest = <EnvFilter as Layer<S>>::register_callsite(filter, meta);
+            let interest =
+                <EnvFilter as tracing_subscriber::Layer<S>>::register_callsite(filter, meta);
             if interest.is_sometimes() || interest.is_always() {
                 return Interest::sometimes();
             }
@@ -137,9 +144,9 @@ where
     }
 
     fn enabled(&self, meta: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        self.filters
-            .iter()
-            .any(|filter| <EnvFilter as Layer<S>>::enabled(filter, meta, ctx.clone()))
+        self.filters.iter().any(|filter| {
+            <EnvFilter as tracing_subscriber::Layer<S>>::enabled(filter, meta, ctx.clone())
+        })
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
@@ -159,7 +166,7 @@ where
 
         let mut matched: u64 = 0;
         for (i, filter) in self.filters.iter().enumerate() {
-            if <EnvFilter as Layer<S>>::enabled(filter, meta, ctx.clone()) {
+            if <EnvFilter as tracing_subscriber::Layer<S>>::enabled(filter, meta, ctx.clone()) {
                 matched |= 1 << i;
             }
         }
@@ -169,12 +176,14 @@ where
 
         self.stats.received.fetch_add(1, Ordering::Relaxed);
 
-        let cache = self.buf_cache.get_or_default();
-        let mut current = cache.take();
-        current.clear();
-        if self.formatter.format_event(event, &mut current).is_err() {
-            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
-            cache.set(current);
+        // Use the inner fmt layer to format the event into the thread-local capture buffer.
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_event(
+            &self.fmt_layer,
+            event,
+            ctx,
+        );
+        let mut current = take_captured(&self.fmt_layer.writer().0);
+        if current.is_empty() {
             return;
         }
 
@@ -186,12 +195,62 @@ where
             current = reservoir.sample(current);
             if current.is_empty() {
                 self.stats.sampled.fetch_add(1, Ordering::Relaxed);
-                cache.set(current);
                 return;
             }
         }
         self.stats.dropped.fetch_add(1, Ordering::Relaxed);
-        current.clear();
-        cache.set(current);
+        return_captured(&self.fmt_layer.writer().0, current);
+    }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_new_span(
+            &self.fmt_layer,
+            attrs,
+            id,
+            ctx,
+        );
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_record(
+            &self.fmt_layer,
+            id,
+            values,
+            ctx,
+        );
+    }
+
+    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_enter(
+            &self.fmt_layer,
+            id,
+            ctx,
+        );
+    }
+
+    fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_exit(
+            &self.fmt_layer,
+            id,
+            ctx,
+        );
+    }
+
+    fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
+        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_close(
+            &self.fmt_layer,
+            id,
+            ctx,
+        );
     }
 }

@@ -14,8 +14,8 @@ to produce a statistically uniform sample per bucket.
   automatically scales this to the bucket duration.
 - **Low overhead** — non-matching callsites are rejected at `register_callsite` time,
   filter results are cached in a bitset, and format buffers are reused via thread-local storage.
-- **Pluggable formatting** — implement the `FormatEvent` trait to customise output.
-  A plain-text formatter (`TextFormat`) is included.
+- **Full `fmt::Layer` integration** — formatting is delegated to `tracing_subscriber::fmt::Layer`,
+  so compact, pretty, JSON, timestamps, and all other formatting options work out of the box.
 
 ## Usage
 
@@ -24,7 +24,9 @@ use std::time::Duration;
 use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 use tracing_log_sample::SamplingLayer;
 
-let (layer, stats) = SamplingLayer::builder()
+let (layer, stats) = SamplingLayer::<Registry>::builder()
+    .without_time()
+    .compact()
     .bucket_duration(Duration::from_millis(50))
     .budget(EnvFilter::new("error"), 1000)   // up to 1000 error events/s
     .budget(EnvFilter::new("info"), 5000)    // up to 5000 info events/s
@@ -41,7 +43,8 @@ tracing::subscriber::set_global_default(subscriber).unwrap();
 1. Each budget has an `EnvFilter` and a reservoir sized to
    `ceil(limit_per_second * bucket_duration_secs)`.
 2. On each event, the layer checks which budgets match (via a `u64` bitset),
-   formats the event once, then feeds it through matching reservoirs in order.
+   delegates to the inner `fmt::Layer` to format the event once, then feeds the
+   formatted bytes through matching reservoirs in order.
 3. If a reservoir is under capacity the event is absorbed. If full,
    Algorithm R randomly decides whether to replace an existing sample — the
    displaced event cascades to the next matching budget.

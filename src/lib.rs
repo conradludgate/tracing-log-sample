@@ -6,6 +6,10 @@
 //! patterns — events displaced from one budget's reservoir cascade to the next
 //! matching budget.
 //!
+//! Formatting is delegated to [`tracing_subscriber::fmt::Layer`], so all the
+//! usual formatting options (compact, pretty, JSON, timestamps, etc.) work
+//! out of the box.
+//!
 //! # Example
 //!
 //! ```
@@ -13,7 +17,7 @@
 //! use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 //! use tracing_log_sample::SamplingLayer;
 //!
-//! let (layer, stats) = SamplingLayer::builder()
+//! let (layer, stats) = SamplingLayer::<Registry>::builder()
 //!     .bucket_duration(Duration::from_millis(50))
 //!     .budget(EnvFilter::new("error"), 1000)
 //!     .budget(EnvFilter::new("info"), 5000)
@@ -25,12 +29,11 @@
 //! ```
 
 mod builder;
-mod format;
+mod capture;
 mod layer;
 mod reservoir;
 
 pub use builder::SamplingLayerBuilder;
-pub use format::{FormatEvent, TextFormat};
 pub use layer::{SamplingLayer, Stats};
 
 #[cfg(test)]
@@ -76,9 +79,11 @@ mod tests {
     fn capture_layer(
         bucket_ms: u64,
         budgets: &[(&str, u64)],
-    ) -> (SamplingLayer<SharedBuf>, SharedBuf) {
+    ) -> (impl tracing_subscriber::Layer<Registry>, SharedBuf) {
         let buf = SharedBuf::default();
-        let mut builder = SamplingLayer::builder()
+        let mut builder = SamplingLayer::<Registry>::builder()
+            .without_time()
+            .with_target(false)
             .bucket_duration(Duration::from_millis(bucket_ms))
             .writer(buf.clone());
         for &(filter, limit) in budgets {
