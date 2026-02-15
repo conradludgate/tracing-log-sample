@@ -570,6 +570,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "fastrand",
+ "thread_local",
  "tracing",
  "tracing-subscriber",
 ]

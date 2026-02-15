@@ -6,6 +6,8 @@ use tracing_subscriber::filter::EnvFilter;
 
 use crate::TextFormat;
 use crate::format::FormatEvent;
+use thread_local::ThreadLocal;
+
 use crate::layer::{SamplingLayer, State};
 use crate::reservoir::Reservoir;
 
@@ -76,6 +78,7 @@ impl<F: FormatEvent> SamplingLayerBuilder<F> {
             bucket_duration_ms: bucket_ms,
             writer: Mutex::new(self.writer),
             formatter: self.formatter,
+            buf_cache: ThreadLocal::new(),
         }
     }
 }

@@ -1,7 +1,9 @@
+use std::cell::Cell;
 use std::io::Write;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use thread_local::ThreadLocal;
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::Layer;
@@ -23,6 +25,7 @@ pub struct SamplingLayer<F = TextFormat> {
     pub(crate) bucket_duration_ms: u64,
     pub(crate) writer: Mutex<Box<dyn Write + Send>>,
     pub(crate) formatter: F,
+    pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
 }
 
 fn current_bucket_index(bucket_duration_ms: u64) -> u64 {
@@ -121,8 +124,11 @@ where
             return;
         }
 
-        let mut current = Vec::new();
+        let cache = self.buf_cache.get_or_default();
+        let mut current = cache.take();
+        current.clear();
         if self.formatter.format_event(event, &mut current).is_err() {
+            cache.set(current);
             return;
         }
 
@@ -133,8 +139,11 @@ where
             }
             current = reservoir.sample(current);
             if current.is_empty() {
+                cache.set(current);
                 return;
             }
         }
+        current.clear();
+        cache.set(current);
     }
 }
