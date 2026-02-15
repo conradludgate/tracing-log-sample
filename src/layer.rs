@@ -21,16 +21,40 @@ pub(crate) struct State {
     pub(crate) reservoirs: Vec<Reservoir>,
 }
 
-/// Counters tracking how many events were processed by the layer.
+/// Shared handle for reading layer event counters.
 ///
+/// Returned by [`SamplingLayerBuilder::build`](crate::SamplingLayerBuilder::build).
 /// All counts are cumulative since layer creation.
+#[derive(Clone)]
 pub struct Stats {
-    /// Events that entered `on_event` (matched at least one filter).
-    pub received: u64,
-    /// Events that were kept in a reservoir (sampled).
-    pub sampled: u64,
+    received: std::sync::Arc<AtomicU64>,
+    sampled: std::sync::Arc<AtomicU64>,
+    dropped: std::sync::Arc<AtomicU64>,
+}
+
+impl Stats {
+    pub(crate) fn new() -> Self {
+        Self {
+            received: std::sync::Arc::new(AtomicU64::new(0)),
+            sampled: std::sync::Arc::new(AtomicU64::new(0)),
+            dropped: std::sync::Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Events that matched at least one filter.
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    /// Events that were kept in a reservoir.
+    pub fn sampled(&self) -> u64 {
+        self.sampled.load(Ordering::Relaxed)
+    }
+
     /// Events that were dropped after failing to enter any reservoir.
-    pub dropped: u64,
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
 }
 
 /// A [`tracing_subscriber::Layer`] that samples events into time-bucketed reservoirs.
@@ -43,9 +67,7 @@ pub struct SamplingLayer<W: for<'a> MakeWriter<'a> = fn() -> io::Stderr, F = Tex
     pub(crate) writer: W,
     pub(crate) formatter: F,
     pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
-    pub(crate) received: AtomicU64,
-    pub(crate) sampled: AtomicU64,
-    pub(crate) dropped: AtomicU64,
+    pub(crate) stats: Stats,
 }
 
 fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
@@ -79,15 +101,6 @@ impl<W: for<'a> MakeWriter<'a>, F: FormatEvent> SamplingLayer<W, F> {
     pub fn flush(&self) {
         let events = Self::drain_all(&mut self.state.lock().unwrap());
         self.write_events(&events);
-    }
-
-    /// Return a snapshot of the layer's event counters.
-    pub fn stats(&self) -> Stats {
-        Stats {
-            received: self.received.load(Ordering::Relaxed),
-            sampled: self.sampled.load(Ordering::Relaxed),
-            dropped: self.dropped.load(Ordering::Relaxed),
-        }
     }
 }
 
@@ -154,13 +167,13 @@ where
             return;
         }
 
-        self.received.fetch_add(1, Ordering::Relaxed);
+        self.stats.received.fetch_add(1, Ordering::Relaxed);
 
         let cache = self.buf_cache.get_or_default();
         let mut current = cache.take();
         current.clear();
         if self.formatter.format_event(event, &mut current).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
             cache.set(current);
             return;
         }
@@ -172,12 +185,12 @@ where
             }
             current = reservoir.sample(current);
             if current.is_empty() {
-                self.sampled.fetch_add(1, Ordering::Relaxed);
+                self.stats.sampled.fetch_add(1, Ordering::Relaxed);
                 cache.set(current);
                 return;
             }
         }
-        self.dropped.fetch_add(1, Ordering::Relaxed);
+        self.stats.dropped.fetch_add(1, Ordering::Relaxed);
         current.clear();
         cache.set(current);
     }

@@ -13,13 +13,14 @@
 //! use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 //! use tracing_log_sample::SamplingLayer;
 //!
-//! let layer = SamplingLayer::builder()
+//! let (layer, stats) = SamplingLayer::builder()
 //!     .bucket_duration(Duration::from_millis(50))
 //!     .budget(EnvFilter::new("error"), 1000)
 //!     .budget(EnvFilter::new("info"), 5000)
 //!     .build();
 //!
 //! let subscriber = Registry::default().with(layer);
+//! // stats.received(), stats.sampled(), stats.dropped()
 //! // tracing::subscriber::set_global_default(subscriber).unwrap();
 //! ```
 
@@ -74,16 +75,17 @@ mod tests {
 
     fn capture_layer(
         bucket_ms: u64,
-        phases: &[(&str, u64)],
+        budgets: &[(&str, u64)],
     ) -> (SamplingLayer<SharedBuf>, SharedBuf) {
         let buf = SharedBuf::default();
         let mut builder = SamplingLayer::builder()
             .bucket_duration(Duration::from_millis(bucket_ms))
             .writer(buf.clone());
-        for &(filter, limit) in phases {
+        for &(filter, limit) in budgets {
             builder = builder.budget(EnvFilter::new(filter), limit);
         }
-        (builder.build(), buf)
+        let (layer, _stats) = builder.build();
+        (layer, buf)
     }
 
     #[test]

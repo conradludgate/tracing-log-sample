@@ -24,14 +24,16 @@ use std::time::Duration;
 use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 use tracing_log_sample::SamplingLayer;
 
-let layer = SamplingLayer::builder()
+let (layer, stats) = SamplingLayer::builder()
     .bucket_duration(Duration::from_millis(50))
     .budget(EnvFilter::new("error"), 1000)   // up to 1000 error events/s
-    .budget(EnvFilter::new("info"), 5000)   // up to 5000 info events/s
+    .budget(EnvFilter::new("info"), 5000)    // up to 5000 info events/s
     .build();
 
 let subscriber = Registry::default().with(layer);
 tracing::subscriber::set_global_default(subscriber).unwrap();
+
+// stats.received(), stats.sampled(), stats.dropped()
 ```
 
 ## How it works

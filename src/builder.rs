@@ -1,6 +1,5 @@
 use std::io;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use thread_local::ThreadLocal;
@@ -9,7 +8,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 use crate::TextFormat;
 use crate::format::FormatEvent;
-use crate::layer::{SamplingLayer, State};
+use crate::layer::{SamplingLayer, State, Stats};
 use crate::reservoir::Reservoir;
 
 /// Builder for [`SamplingLayer`](crate::SamplingLayer).
@@ -70,8 +69,9 @@ impl<W, F> SamplingLayerBuilder<W, F> {
 }
 
 impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W, F> {
-    /// Consume the builder and create a [`SamplingLayer`](crate::SamplingLayer).
-    pub fn build(self) -> SamplingLayer<W, F> {
+    /// Consume the builder and create a [`SamplingLayer`](crate::SamplingLayer)
+    /// and a [`Stats`] handle for reading event counters.
+    pub fn build(self) -> (SamplingLayer<W, F>, Stats) {
         let bucket_ns = self.bucket_duration.as_nanos() as u64;
         assert!(bucket_ns > 0, "bucket_duration must be > 0");
 
@@ -87,7 +87,8 @@ impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W
             reservoirs.push(Reservoir::new(limit_per_bucket));
         }
 
-        SamplingLayer {
+        let stats = Stats::new();
+        let layer = SamplingLayer {
             filters,
             state: Mutex::new(State {
                 bucket_index: 0,
@@ -97,9 +98,8 @@ impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W
             writer: self.writer,
             formatter: self.formatter,
             buf_cache: ThreadLocal::new(),
-            received: AtomicU64::new(0),
-            sampled: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
-        }
+            stats: stats.clone(),
+        };
+        (layer, stats)
     }
 }

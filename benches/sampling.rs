@@ -37,7 +37,8 @@ fn sampling_layer(budgets: &[(&str, u64)]) -> Dispatch {
     for &(filter, limit) in budgets {
         builder = builder.budget(EnvFilter::new(filter), limit);
     }
-    Dispatch::new(Registry::default().with(builder.build()))
+    let (layer, _stats) = builder.build();
+    Dispatch::new(Registry::default().with(layer))
 }
 
 fn bench_threaded(
