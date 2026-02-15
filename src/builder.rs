@@ -16,7 +16,7 @@ use crate::reservoir::Reservoir;
 ///
 /// Created via [`SamplingLayer::builder()`](crate::SamplingLayer::builder).
 pub struct SamplingLayerBuilder<W = fn() -> io::Stderr, F = TextFormat> {
-    phases: Vec<(EnvFilter, u64)>,
+    budgets: Vec<(EnvFilter, u64)>,
     bucket_duration: Duration,
     writer: W,
     formatter: F,
@@ -25,7 +25,7 @@ pub struct SamplingLayerBuilder<W = fn() -> io::Stderr, F = TextFormat> {
 impl SamplingLayer {
     pub fn builder() -> SamplingLayerBuilder {
         SamplingLayerBuilder {
-            phases: Vec::new(),
+            budgets: Vec::new(),
             bucket_duration: Duration::from_millis(50),
             writer: io::stderr as fn() -> io::Stderr,
             formatter: TextFormat,
@@ -34,11 +34,11 @@ impl SamplingLayer {
 }
 
 impl<W, F> SamplingLayerBuilder<W, F> {
-    /// Add a sampling phase with an [`EnvFilter`] and a per-second event budget.
+    /// Add a sampling budget with an [`EnvFilter`] and a per-second event limit.
     ///
-    /// Phases with a budget that rounds to zero events per bucket are skipped.
-    pub fn phase(mut self, filter: EnvFilter, limit_per_second: u64) -> Self {
-        self.phases.push((filter, limit_per_second));
+    /// Budgets whose limit rounds to zero events per bucket are skipped.
+    pub fn budget(mut self, filter: EnvFilter, limit_per_second: u64) -> Self {
+        self.budgets.push((filter, limit_per_second));
         self
     }
 
@@ -51,7 +51,7 @@ impl<W, F> SamplingLayerBuilder<W, F> {
     /// Set the output writer. Defaults to stderr.
     pub fn writer<W2>(self, writer: W2) -> SamplingLayerBuilder<W2, F> {
         SamplingLayerBuilder {
-            phases: self.phases,
+            budgets: self.budgets,
             bucket_duration: self.bucket_duration,
             writer,
             formatter: self.formatter,
@@ -61,7 +61,7 @@ impl<W, F> SamplingLayerBuilder<W, F> {
     /// Replace the event formatter.
     pub fn formatter<F2>(self, formatter: F2) -> SamplingLayerBuilder<W, F2> {
         SamplingLayerBuilder {
-            phases: self.phases,
+            budgets: self.budgets,
             bucket_duration: self.bucket_duration,
             writer: self.writer,
             formatter,
@@ -78,7 +78,7 @@ impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W
         let bucket_secs = self.bucket_duration.as_secs_f64();
         let mut filters = Vec::new();
         let mut reservoirs = Vec::new();
-        for (filter, limit_per_second) in self.phases {
+        for (filter, limit_per_second) in self.budgets {
             let limit_per_bucket = (limit_per_second as f64 * bucket_secs).ceil() as usize;
             if limit_per_bucket == 0 {
                 continue;

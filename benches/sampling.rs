@@ -30,12 +30,12 @@ impl<'a> MakeWriter<'a> for SlowWriter {
     }
 }
 
-fn sampling_layer(phases: &[(&str, u64)]) -> Dispatch {
+fn sampling_layer(budgets: &[(&str, u64)]) -> Dispatch {
     let mut builder = SamplingLayer::builder()
         .bucket_duration(Duration::from_millis(50))
         .writer(SlowWriter);
-    for &(filter, limit) in phases {
-        builder = builder.phase(EnvFilter::new(filter), limit);
+    for &(filter, limit) in budgets {
+        builder = builder.budget(EnvFilter::new(filter), limit);
     }
     Dispatch::new(Registry::default().with(builder.build()))
 }
@@ -97,7 +97,7 @@ fn bench_single_thread(c: &mut Criterion) {
     });
 
     let dispatch = sampling_layer(&[("error", 100), ("trace", 1000)]);
-    group.bench_function("multi_phase", |b| {
+    group.bench_function("multi_budget", |b| {
         bench_threaded(&dispatch, 1, b, emit_error);
     });
 

@@ -2,9 +2,9 @@
 //!
 //! Events are collected into fixed-duration time buckets and sampled using
 //! Algorithm R, producing a statistically uniform sample per bucket. Multiple
-//! sampling phases can be configured with [`EnvFilter`](tracing_subscriber::filter::EnvFilter)
-//! patterns — events displaced from one phase's reservoir cascade to the next
-//! matching phase.
+//! sampling budgets can be configured with [`EnvFilter`](tracing_subscriber::filter::EnvFilter)
+//! patterns — events displaced from one budget's reservoir cascade to the next
+//! matching budget.
 //!
 //! # Example
 //!
@@ -15,8 +15,8 @@
 //!
 //! let layer = SamplingLayer::builder()
 //!     .bucket_duration(Duration::from_millis(50))
-//!     .phase(EnvFilter::new("error"), 1000)
-//!     .phase(EnvFilter::new("info"), 5000)
+//!     .budget(EnvFilter::new("error"), 1000)
+//!     .budget(EnvFilter::new("info"), 5000)
 //!     .build();
 //!
 //! let subscriber = Registry::default().with(layer);
@@ -81,7 +81,7 @@ mod tests {
             .bucket_duration(Duration::from_millis(bucket_ms))
             .writer(buf.clone());
         for &(filter, limit) in phases {
-            builder = builder.phase(EnvFilter::new(filter), limit);
+            builder = builder.budget(EnvFilter::new(filter), limit);
         }
         (builder.build(), buf)
     }
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn ejected_events_cascade_to_next_phase() {
+    fn ejected_events_cascade_to_next_budget() {
         let (layer, buf) = capture_layer(1_000, &[("error", 5), ("trace", 50)]);
         let subscriber = Registry::default().with(layer);
 
@@ -115,7 +115,7 @@ mod tests {
         let lines = buf.lines();
         assert!(
             lines.len() > 5,
-            "cascade should produce more than phase 1's limit of 5, got {}",
+            "cascade should produce more than budget 1's limit of 5, got {}",
             lines.len()
         );
         assert!(
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_phases_separate_levels() {
+    fn multiple_budgets_separate_levels() {
         let (layer, buf) = capture_layer(1_000, &[("error", 10), ("debug", 10)]);
         let subscriber = Registry::default().with(layer);
 

@@ -8,9 +8,9 @@ to produce a statistically uniform sample per bucket.
 
 ## Features
 
-- **Cascading phases** — define multiple sampling phases with `EnvFilter` patterns.
-  Events displaced from one phase's reservoir are passed to the next matching phase.
-- **Budget-based** — configure a per-second event limit for each phase; the layer
+- **Cascading budgets** — define multiple sampling budgets with `EnvFilter` patterns.
+  Events displaced from one budget's reservoir are passed to the next matching budget.
+- **Budget-based** — configure a per-second event limit for each budget; the layer
   automatically scales this to the bucket duration.
 - **Low overhead** — non-matching callsites are rejected at `register_callsite` time,
   filter results are cached in a bitset, and format buffers are reused via thread-local storage.
@@ -26,8 +26,8 @@ use tracing_log_sample::SamplingLayer;
 
 let layer = SamplingLayer::builder()
     .bucket_duration(Duration::from_millis(50))
-    .phase(EnvFilter::new("error"), 1000)   // up to 1000 error events/s
-    .phase(EnvFilter::new("info"), 5000)    // up to 5000 info events/s
+    .budget(EnvFilter::new("error"), 1000)   // up to 1000 error events/s
+    .budget(EnvFilter::new("info"), 5000)   // up to 5000 info events/s
     .build();
 
 let subscriber = Registry::default().with(layer);
@@ -36,13 +36,13 @@ tracing::subscriber::set_global_default(subscriber).unwrap();
 
 ## How it works
 
-1. Each phase has an `EnvFilter` and a reservoir sized to
+1. Each budget has an `EnvFilter` and a reservoir sized to
    `ceil(limit_per_second * bucket_duration_secs)`.
-2. On each event, the layer checks which phases match (via a `u64` bitset),
+2. On each event, the layer checks which budgets match (via a `u64` bitset),
    formats the event once, then feeds it through matching reservoirs in order.
 3. If a reservoir is under capacity the event is absorbed. If full,
    Algorithm R randomly decides whether to replace an existing sample — the
-   displaced event cascades to the next matching phase.
+   displaced event cascades to the next matching budget.
 4. When the time bucket advances, all reservoirs are drained and written out.
 
 [`tracing-subscriber`]: https://docs.rs/tracing-subscriber
