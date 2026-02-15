@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use thread_local::ThreadLocal;
@@ -33,9 +34,11 @@ impl SamplingLayer {
 }
 
 impl<W, F> SamplingLayerBuilder<W, F> {
-    /// Add a sampling phase with an [`EnvFilter`] pattern and a per-second event budget.
-    pub fn phase(mut self, filter: &str, limit_per_second: u64) -> Self {
-        self.phases.push((EnvFilter::new(filter), limit_per_second));
+    /// Add a sampling phase with an [`EnvFilter`] and a per-second event budget.
+    ///
+    /// Phases with a budget that rounds to zero events per bucket are skipped.
+    pub fn phase(mut self, filter: EnvFilter, limit_per_second: u64) -> Self {
+        self.phases.push((filter, limit_per_second));
         self
     }
 
@@ -76,7 +79,10 @@ impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W
         let mut filters = Vec::new();
         let mut reservoirs = Vec::new();
         for (filter, limit_per_second) in self.phases {
-            let limit_per_bucket = ((limit_per_second as f64 * bucket_secs).ceil() as usize).max(1);
+            let limit_per_bucket = (limit_per_second as f64 * bucket_secs).ceil() as usize;
+            if limit_per_bucket == 0 {
+                continue;
+            }
             filters.push(filter);
             reservoirs.push(Reservoir::new(limit_per_bucket));
         }
@@ -91,6 +97,9 @@ impl<W: for<'a> MakeWriter<'a> + 'static, F: FormatEvent> SamplingLayerBuilder<W
             writer: self.writer,
             formatter: self.formatter,
             buf_cache: ThreadLocal::new(),
+            received: AtomicU64::new(0),
+            sampled: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
         }
     }
 }

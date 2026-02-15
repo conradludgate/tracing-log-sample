@@ -21,13 +21,13 @@ to produce a statistically uniform sample per bucket.
 
 ```rust
 use std::time::Duration;
-use tracing_subscriber::{Registry, layer::SubscriberExt};
+use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 use tracing_log_sample::SamplingLayer;
 
 let layer = SamplingLayer::builder()
     .bucket_duration(Duration::from_millis(50))
-    .phase("error", 1000)   // up to 1000 error events/s
-    .phase("info", 5000)    // up to 5000 info events/s
+    .phase(EnvFilter::new("error"), 1000)   // up to 1000 error events/s
+    .phase(EnvFilter::new("info"), 5000)    // up to 5000 info events/s
     .build();
 
 let subscriber = Registry::default().with(layer);

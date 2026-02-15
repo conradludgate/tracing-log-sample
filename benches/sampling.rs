@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tracing::dispatcher::{self, Dispatch};
 use tracing_log_sample::SamplingLayer;
 use tracing_subscriber::Registry;
+use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -34,7 +35,7 @@ fn sampling_layer(phases: &[(&str, u64)]) -> Dispatch {
         .bucket_duration(Duration::from_millis(50))
         .writer(SlowWriter);
     for &(filter, limit) in phases {
-        builder = builder.phase(filter, limit);
+        builder = builder.phase(EnvFilter::new(filter), limit);
     }
     Dispatch::new(Registry::default().with(builder.build()))
 }

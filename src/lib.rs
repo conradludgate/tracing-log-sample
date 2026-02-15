@@ -10,13 +10,13 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use tracing_subscriber::{Registry, layer::SubscriberExt};
+//! use tracing_subscriber::{Registry, filter::EnvFilter, layer::SubscriberExt};
 //! use tracing_log_sample::SamplingLayer;
 //!
 //! let layer = SamplingLayer::builder()
 //!     .bucket_duration(Duration::from_millis(50))
-//!     .phase("error", 1000)
-//!     .phase("info", 5000)
+//!     .phase(EnvFilter::new("error"), 1000)
+//!     .phase(EnvFilter::new("info"), 5000)
 //!     .build();
 //!
 //! let subscriber = Registry::default().with(layer);
@@ -30,7 +30,7 @@ mod reservoir;
 
 pub use builder::SamplingLayerBuilder;
 pub use format::{FormatEvent, TextFormat};
-pub use layer::SamplingLayer;
+pub use layer::{SamplingLayer, Stats};
 
 #[cfg(test)]
 mod tests {
@@ -39,6 +39,7 @@ mod tests {
     use std::time::Duration;
 
     use tracing_subscriber::Registry;
+    use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -80,7 +81,7 @@ mod tests {
             .bucket_duration(Duration::from_millis(bucket_ms))
             .writer(buf.clone());
         for &(filter, limit) in phases {
-            builder = builder.phase(filter, limit);
+            builder = builder.phase(EnvFilter::new(filter), limit);
         }
         (builder.build(), buf)
     }

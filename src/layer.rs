@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thread_local::ThreadLocal;
@@ -20,6 +21,18 @@ pub(crate) struct State {
     pub(crate) reservoirs: Vec<Reservoir>,
 }
 
+/// Counters tracking how many events were processed by the layer.
+///
+/// All counts are cumulative since layer creation.
+pub struct Stats {
+    /// Events that entered `on_event` (matched at least one filter).
+    pub received: u64,
+    /// Events that were kept in a reservoir (sampled).
+    pub sampled: u64,
+    /// Events that were dropped after failing to enter any reservoir.
+    pub dropped: u64,
+}
+
 /// A [`tracing_subscriber::Layer`] that samples events into time-bucketed reservoirs.
 ///
 /// Construct via [`SamplingLayer::builder()`](crate::SamplingLayerBuilder).
@@ -30,6 +43,9 @@ pub struct SamplingLayer<W: for<'a> MakeWriter<'a> = fn() -> io::Stderr, F = Tex
     pub(crate) writer: W,
     pub(crate) formatter: F,
     pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
+    pub(crate) received: AtomicU64,
+    pub(crate) sampled: AtomicU64,
+    pub(crate) dropped: AtomicU64,
 }
 
 fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
@@ -63,6 +79,15 @@ impl<W: for<'a> MakeWriter<'a>, F: FormatEvent> SamplingLayer<W, F> {
     pub fn flush(&self) {
         let events = Self::drain_all(&mut self.state.lock().unwrap());
         self.write_events(&events);
+    }
+
+    /// Return a snapshot of the layer's event counters.
+    pub fn stats(&self) -> Stats {
+        Stats {
+            received: self.received.load(Ordering::Relaxed),
+            sampled: self.sampled.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -129,10 +154,13 @@ where
             return;
         }
 
+        self.received.fetch_add(1, Ordering::Relaxed);
+
         let cache = self.buf_cache.get_or_default();
         let mut current = cache.take();
         current.clear();
         if self.formatter.format_event(event, &mut current).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             cache.set(current);
             return;
         }
@@ -144,10 +172,12 @@ where
             }
             current = reservoir.sample(current);
             if current.is_empty() {
+                self.sampled.fetch_add(1, Ordering::Relaxed);
                 cache.set(current);
                 return;
             }
         }
+        self.dropped.fetch_add(1, Ordering::Relaxed);
         current.clear();
         cache.set(current);
     }
