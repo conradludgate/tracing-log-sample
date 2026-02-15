@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +8,7 @@ use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::Context;
 
 use crate::TextFormat;
@@ -19,11 +20,14 @@ pub(crate) struct State {
     pub(crate) reservoirs: Vec<Reservoir>,
 }
 
-pub struct SamplingLayer<F = TextFormat> {
+/// A [`tracing_subscriber::Layer`] that samples events into time-bucketed reservoirs.
+///
+/// Construct via [`SamplingLayer::builder()`](crate::SamplingLayerBuilder).
+pub struct SamplingLayer<W: for<'a> MakeWriter<'a> = fn() -> io::Stderr, F = TextFormat> {
     pub(crate) filters: Vec<EnvFilter>,
     pub(crate) state: Mutex<State>,
     pub(crate) bucket_duration_ns: u64,
-    pub(crate) writer: Mutex<Box<dyn Write + Send>>,
+    pub(crate) writer: W,
     pub(crate) formatter: F,
     pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
 }
@@ -36,7 +40,7 @@ fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
         / bucket_duration_ns
 }
 
-impl<F: FormatEvent> SamplingLayer<F> {
+impl<W: for<'a> MakeWriter<'a>, F: FormatEvent> SamplingLayer<W, F> {
     fn drain_all(state: &mut State) -> Vec<Vec<u8>> {
         state
             .reservoirs
@@ -49,19 +53,20 @@ impl<F: FormatEvent> SamplingLayer<F> {
         if events.is_empty() {
             return;
         }
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self.writer.make_writer();
         for event in events {
             let _ = writer.write_all(event);
         }
     }
 
+    /// Drain all reservoirs and write their contents immediately.
     pub fn flush(&self) {
         let events = Self::drain_all(&mut self.state.lock().unwrap());
         self.write_events(&events);
     }
 }
 
-impl<F> Drop for SamplingLayer<F> {
+impl<W: for<'a> MakeWriter<'a>, F> Drop for SamplingLayer<W, F> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             let events: Vec<Vec<u8>> = state
@@ -69,18 +74,18 @@ impl<F> Drop for SamplingLayer<F> {
                 .iter_mut()
                 .flat_map(|r| r.drain())
                 .collect();
-            if let Ok(mut writer) = self.writer.lock() {
-                for event in &events {
-                    let _ = writer.write_all(event);
-                }
+            let mut writer = self.writer.make_writer();
+            for event in &events {
+                let _ = writer.write_all(event);
             }
         }
     }
 }
 
-impl<S, F> Layer<S> for SamplingLayer<F>
+impl<S, W, F> Layer<S> for SamplingLayer<W, F>
 where
     S: Subscriber,
+    W: for<'a> MakeWriter<'a> + 'static,
     F: FormatEvent + 'static,
 {
     fn register_callsite(&self, meta: &'static Metadata<'static>) -> Interest {

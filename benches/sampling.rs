@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tracing::dispatcher::{self, Dispatch};
 use tracing_log_sample::SamplingLayer;
 use tracing_subscriber::Registry;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 
 struct SlowWriter;
@@ -18,6 +19,13 @@ impl Write for SlowWriter {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for SlowWriter {
+    type Writer = SlowWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        SlowWriter
     }
 }
 

@@ -4,10 +4,16 @@ use tracing::Event;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::{DefaultFields, Writer};
 
+/// Formats a [`tracing::Event`] into a byte buffer.
+///
+/// Implement this trait to customise how sampled events are serialised
+/// before being written out.
 pub trait FormatEvent: Send + Sync {
+    /// Write a formatted representation of `event` into `buf`.
     fn format_event(&self, event: &Event<'_>, buf: &mut Vec<u8>) -> std::fmt::Result;
 }
 
+/// Plain-text formatter that writes `LEVEL target fields\n`.
 pub struct TextFormat;
 
 impl FormatEvent for TextFormat {

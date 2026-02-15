@@ -1,3 +1,28 @@
+//! A [`tracing_subscriber::Layer`] that rate-limits log output using reservoir sampling.
+//!
+//! Events are collected into fixed-duration time buckets and sampled using
+//! Algorithm R, producing a statistically uniform sample per bucket. Multiple
+//! sampling phases can be configured with [`EnvFilter`](tracing_subscriber::filter::EnvFilter)
+//! patterns — events displaced from one phase's reservoir cascade to the next
+//! matching phase.
+//!
+//! # Example
+//!
+//! ```
+//! use std::time::Duration;
+//! use tracing_subscriber::{Registry, layer::SubscriberExt};
+//! use tracing_log_sample::SamplingLayer;
+//!
+//! let layer = SamplingLayer::builder()
+//!     .bucket_duration(Duration::from_millis(50))
+//!     .phase("error", 1000)
+//!     .phase("info", 5000)
+//!     .build();
+//!
+//! let subscriber = Registry::default().with(layer);
+//! // tracing::subscriber::set_global_default(subscriber).unwrap();
+//! ```
+
 mod builder;
 mod format;
 mod layer;
@@ -14,6 +39,7 @@ mod tests {
     use std::time::Duration;
 
     use tracing_subscriber::Registry;
+    use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
     use crate::SamplingLayer;
@@ -30,6 +56,13 @@ mod tests {
         }
     }
 
+    impl<'a> MakeWriter<'a> for SharedBuf {
+        type Writer = SharedBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     impl SharedBuf {
         fn lines(&self) -> Vec<String> {
             let raw = self.0.lock().unwrap();
@@ -38,7 +71,10 @@ mod tests {
         }
     }
 
-    fn capture_layer(bucket_ms: u64, phases: &[(&str, u64)]) -> (SamplingLayer, SharedBuf) {
+    fn capture_layer(
+        bucket_ms: u64,
+        phases: &[(&str, u64)],
+    ) -> (SamplingLayer<SharedBuf>, SharedBuf) {
         let buf = SharedBuf::default();
         let mut builder = SamplingLayer::builder()
             .bucket_duration(Duration::from_millis(bucket_ms))
