@@ -2,12 +2,11 @@ use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use thread_local::ThreadLocal;
 use tracing_subscriber::filter::EnvFilter;
 
 use crate::TextFormat;
 use crate::format::FormatEvent;
-use thread_local::ThreadLocal;
-
 use crate::layer::{SamplingLayer, State};
 use crate::reservoir::Reservoir;
 
@@ -57,14 +56,14 @@ impl<F> SamplingLayerBuilder<F> {
 
 impl<F: FormatEvent> SamplingLayerBuilder<F> {
     pub fn build(self) -> SamplingLayer<F> {
-        let bucket_ms = self.bucket_duration.as_millis() as u64;
-        assert!(bucket_ms > 0, "bucket_duration must be > 0");
+        let bucket_ns = self.bucket_duration.as_nanos() as u64;
+        assert!(bucket_ns > 0, "bucket_duration must be > 0");
 
+        let bucket_secs = self.bucket_duration.as_secs_f64();
         let mut filters = Vec::new();
         let mut reservoirs = Vec::new();
         for (filter, limit_per_second) in self.phases {
-            let limit_per_bucket =
-                ((limit_per_second as f64 * bucket_ms as f64 / 1000.0).ceil() as usize).max(1);
+            let limit_per_bucket = ((limit_per_second as f64 * bucket_secs).ceil() as usize).max(1);
             filters.push(filter);
             reservoirs.push(Reservoir::new(limit_per_bucket));
         }
@@ -75,7 +74,7 @@ impl<F: FormatEvent> SamplingLayerBuilder<F> {
                 bucket_index: 0,
                 reservoirs,
             }),
-            bucket_duration_ms: bucket_ms,
+            bucket_duration_ns: bucket_ns,
             writer: Mutex::new(self.writer),
             formatter: self.formatter,
             buf_cache: ThreadLocal::new(),

@@ -22,18 +22,18 @@ pub(crate) struct State {
 pub struct SamplingLayer<F = TextFormat> {
     pub(crate) filters: Vec<EnvFilter>,
     pub(crate) state: Mutex<State>,
-    pub(crate) bucket_duration_ms: u64,
+    pub(crate) bucket_duration_ns: u64,
     pub(crate) writer: Mutex<Box<dyn Write + Send>>,
     pub(crate) formatter: F,
     pub(crate) buf_cache: ThreadLocal<Cell<Vec<u8>>>,
 }
 
-fn current_bucket_index(bucket_duration_ms: u64) -> u64 {
+fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
-        / bucket_duration_ms
+        .as_nanos() as u64
+        / bucket_duration_ns
 }
 
 impl<F: FormatEvent> SamplingLayer<F> {
@@ -101,7 +101,7 @@ where
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let meta = event.metadata();
-        let bucket_index = current_bucket_index(self.bucket_duration_ms);
+        let bucket_index = current_bucket_index(self.bucket_duration_ns);
 
         let flushed = {
             let mut state = self.state.lock().unwrap();
