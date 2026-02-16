@@ -190,6 +190,7 @@ where
             filters,
             state: Mutex::new(State {
                 bucket_index: 0,
+                seq: 0,
                 reservoirs,
             }),
             bucket_duration_ns: bucket_ns,

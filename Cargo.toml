@@ -11,6 +11,7 @@ thread_local = "1"
 
 [dev-dependencies]
 criterion = "0.8"
+statrs = "0.18"
 
 [[bench]]
 name = "sampling"

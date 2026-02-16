@@ -17,7 +17,8 @@ use crate::reservoir::Reservoir;
 
 pub(crate) struct State {
     pub(crate) bucket_index: u64,
-    pub(crate) reservoirs: Vec<Reservoir>,
+    pub(crate) seq: u64,
+    pub(crate) reservoirs: Vec<Reservoir<(u64, Vec<u8>)>>,
 }
 
 /// Shared handle for reading layer event counters.
@@ -84,21 +85,23 @@ fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
 }
 
 impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
-    fn drain_all(state: &mut State) -> Vec<Vec<u8>> {
-        state
+    fn drain_all(state: &mut State) -> Vec<(u64, Vec<u8>)> {
+        let mut events: Vec<_> = state
             .reservoirs
             .iter_mut()
             .flat_map(|r| r.drain())
-            .collect()
+            .collect();
+        events.sort_unstable_by_key(|(seq, _)| *seq);
+        events
     }
 
-    fn write_events(&self, events: &[Vec<u8>]) {
+    fn write_events(&self, events: &[(u64, Vec<u8>)]) {
         if events.is_empty() {
             return;
         }
         let mut writer = self.writer.make_writer();
-        for event in events {
-            let _ = writer.write_all(event);
+        for (_, buf) in events {
+            let _ = writer.write_all(buf);
         }
     }
 
@@ -112,15 +115,8 @@ impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
 impl<S, N, E, W: for<'a> MakeWriter<'a>> Drop for SamplingLayer<S, N, E, W> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
-            let events: Vec<Vec<u8>> = state
-                .reservoirs
-                .iter_mut()
-                .flat_map(|r| r.drain())
-                .collect();
-            let mut writer = self.writer.make_writer();
-            for event in &events {
-                let _ = writer.write_all(event);
-            }
+            let events = Self::drain_all(&mut state);
+            self.write_events(&events);
         }
     }
 }
@@ -182,24 +178,26 @@ where
             event,
             ctx,
         );
-        let mut current = take_captured(&self.fmt_layer.writer().0);
-        if current.is_empty() {
+        let bytes = take_captured(&self.fmt_layer.writer().0);
+        if bytes.is_empty() {
             return;
         }
 
         let mut state = self.state.lock().unwrap();
+        state.seq += 1;
+        let mut current = (state.seq, bytes);
         for (i, reservoir) in state.reservoirs.iter_mut().enumerate() {
             if matched & (1 << i) == 0 {
                 continue;
             }
             current = reservoir.sample(current);
-            if current.is_empty() {
+            if current.1.is_empty() {
                 self.stats.sampled.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
         self.stats.dropped.fetch_add(1, Ordering::Relaxed);
-        return_captured(&self.fmt_layer.writer().0, current);
+        return_captured(&self.fmt_layer.writer().0, current.1);
     }
 
     fn on_new_span(

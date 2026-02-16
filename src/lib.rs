@@ -176,6 +176,78 @@ mod tests {
     }
 
     #[test]
+    fn flushed_events_are_in_arrival_order() {
+        let (layer, buf) = capture_layer(1_000, &[("error", 10)]);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..200 {
+                tracing::error!(i, "seq");
+            }
+        });
+
+        let lines = buf.lines();
+        assert_eq!(lines.len(), 10);
+
+        let numbers: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                let s = line.rsplit("i=").next().unwrap().trim();
+                s.parse().unwrap()
+            })
+            .collect();
+
+        for w in numbers.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "events not in arrival order: {} came before {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn flushed_cascade_events_are_in_arrival_order() {
+        let (layer, buf) = capture_layer(1_000, &[("error", 5), ("trace", 10)]);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..200u32 {
+                if i % 2 == 0 {
+                    tracing::error!(i, "seq");
+                } else {
+                    tracing::trace!(i, "seq");
+                }
+            }
+        });
+
+        let lines = buf.lines();
+        assert!(
+            lines.len() > 5,
+            "cascade should produce more than first budget's limit of 5, got {}",
+            lines.len()
+        );
+
+        let numbers: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                let s = line.rsplit("i=").next().unwrap().trim();
+                s.parse().unwrap()
+            })
+            .collect();
+
+        for w in numbers.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "events not in arrival order: {} came before {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
     fn bucket_rotation_flushes() {
         let (layer, buf) = capture_layer(50, &[("trace", 1000)]);
         let subscriber = Registry::default().with(layer);
