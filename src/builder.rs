@@ -1,7 +1,7 @@
 use std::io;
 use std::marker::PhantomData;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::Subscriber;
 use tracing_subscriber::filter::EnvFilter;
@@ -170,8 +170,10 @@ where
     /// Consume the builder and create a [`SamplingLayer`](crate::SamplingLayer)
     /// and a [`Stats`] handle for reading event counters.
     pub fn build(self) -> (SamplingLayer<S, N, E, W>, Stats) {
-        let bucket_ns = self.bucket_duration.as_nanos() as u64;
-        assert!(bucket_ns > 0, "bucket_duration must be > 0");
+        assert!(
+            !self.bucket_duration.is_zero(),
+            "bucket_duration must be > 0"
+        );
 
         let bucket_secs = self.bucket_duration.as_secs_f64();
         let mut filters = Vec::new();
@@ -185,15 +187,18 @@ where
             reservoirs.push(Reservoir::new(limit_per_bucket));
         }
 
+        let now = Instant::now();
         let stats = Stats::new();
         let layer = SamplingLayer {
             filters,
             state: Mutex::new(State {
-                bucket_index: 0,
+                bucket_start: now,
                 seq: 0,
                 reservoirs,
+                pending: Vec::new().into_iter(),
+                last_release: now,
             }),
-            bucket_duration_ns: bucket_ns,
+            bucket_duration: self.bucket_duration,
             writer: self.writer,
             fmt_layer: self.fmt_layer,
             stats: stats.clone(),

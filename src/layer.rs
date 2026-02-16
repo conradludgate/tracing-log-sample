@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
@@ -16,9 +16,11 @@ use crate::capture::{CaptureMakeWriter, return_captured, take_captured};
 use crate::reservoir::Reservoir;
 
 pub(crate) struct State {
-    pub(crate) bucket_index: u64,
+    pub(crate) bucket_start: Instant,
     pub(crate) seq: u64,
     pub(crate) reservoirs: Vec<Reservoir<(u64, Vec<u8>)>>,
+    pub(crate) pending: std::vec::IntoIter<(u64, Vec<u8>)>,
+    pub(crate) last_release: Instant,
 }
 
 /// Shared handle for reading layer event counters.
@@ -60,6 +62,9 @@ impl Stats {
 /// A [`tracing_subscriber::Layer`] that samples events into time-bucketed reservoirs.
 ///
 /// Uses `tracing_subscriber::fmt::Layer` internally for event formatting.
+/// Sampled events are smeared across the bucket duration to reduce tail-latency
+/// spikes from burst writes.
+///
 /// Construct via [`SamplingLayer::builder()`](crate::SamplingLayerBuilder).
 pub struct SamplingLayer<
     S,
@@ -69,19 +74,11 @@ pub struct SamplingLayer<
 > {
     pub(crate) filters: Vec<EnvFilter>,
     pub(crate) state: Mutex<State>,
-    pub(crate) bucket_duration_ns: u64,
+    pub(crate) bucket_duration: Duration,
     pub(crate) writer: W,
     pub(crate) fmt_layer: fmt::Layer<S, N, E, CaptureMakeWriter>,
     pub(crate) stats: Stats,
     pub(crate) _subscriber: PhantomData<fn(S)>,
-}
-
-fn current_bucket_index(bucket_duration_ns: u64) -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64
-        / bucket_duration_ns
 }
 
 impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
@@ -105,18 +102,60 @@ impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
         }
     }
 
+    fn smear_collect(
+        state: &mut State,
+        now: Instant,
+        bucket_duration: Duration,
+    ) -> Vec<(u64, Vec<u8>)> {
+        let n = state.pending.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let bucket_end = state.bucket_start + bucket_duration;
+        let remaining = bucket_end.saturating_duration_since(now);
+        let to_release = if remaining.is_zero() {
+            n
+        } else {
+            let interval = remaining / n as u32;
+            if interval.is_zero() {
+                n
+            } else {
+                let since_last = now.duration_since(state.last_release);
+                (since_last.as_nanos() / interval.as_nanos()) as usize
+            }
+        };
+
+        if to_release > 0 {
+            let batch: Vec<_> = state.pending.by_ref().take(to_release).collect();
+            state.last_release = now;
+            batch
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Drain all reservoirs and write their contents immediately.
     pub fn flush(&self) {
-        let events = Self::drain_all(&mut self.state.lock().unwrap());
-        self.write_events(&events);
+        let (pending, drained) = {
+            let mut state = self.state.lock().unwrap();
+            let pending: Vec<_> = state.pending.by_ref().collect();
+            let drained = Self::drain_all(&mut state);
+            (pending, drained)
+        };
+        self.write_events(&pending);
+        self.write_events(&drained);
     }
 }
 
 impl<S, N, E, W: for<'a> MakeWriter<'a>> Drop for SamplingLayer<S, N, E, W> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
-            let events = Self::drain_all(&mut state);
-            self.write_events(&events);
+            let pending: Vec<_> = state.pending.by_ref().collect();
+            let drained = Self::drain_all(&mut state);
+            drop(state);
+            self.write_events(&pending);
+            self.write_events(&drained);
         }
     }
 }
@@ -147,18 +186,23 @@ where
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let meta = event.metadata();
-        let bucket_index = current_bucket_index(self.bucket_duration_ns);
+        let now = Instant::now();
 
-        let flushed = {
+        let to_write = {
             let mut state = self.state.lock().unwrap();
-            if state.bucket_index < bucket_index {
-                state.bucket_index = bucket_index;
-                Self::drain_all(&mut state)
-            } else {
-                Vec::new()
+
+            let mut batch = Self::smear_collect(&mut state, now, self.bucket_duration);
+
+            if now.duration_since(state.bucket_start) >= self.bucket_duration {
+                batch.extend(state.pending.by_ref());
+                let drained = Self::drain_all(&mut state);
+                state.pending = drained.into_iter();
+                state.bucket_start = now;
+                state.last_release = now;
             }
+            batch
         };
-        self.write_events(&flushed);
+        self.write_events(&to_write);
 
         let mut matched: u64 = 0;
         for (i, filter) in self.filters.iter().enumerate() {
@@ -172,7 +216,6 @@ where
 
         self.stats.received.fetch_add(1, Ordering::Relaxed);
 
-        // Use the inner fmt layer to format the event into the thread-local capture buffer.
         <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_event(
             &self.fmt_layer,
             event,

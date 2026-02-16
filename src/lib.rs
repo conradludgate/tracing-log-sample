@@ -267,4 +267,96 @@ mod tests {
             lines.len()
         );
     }
+
+    #[test]
+    fn smearing_releases_incrementally() {
+        // 100/s * 0.2s = 20 per bucket
+        let (layer, buf) = capture_layer(200, &[("error", 100)]);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..50 {
+                tracing::error!("fill");
+            }
+
+            std::thread::sleep(Duration::from_millis(210));
+
+            let mut counts = Vec::new();
+            for _ in 0..20 {
+                tracing::error!("trigger");
+                std::thread::sleep(Duration::from_millis(10));
+                counts.push(buf.lines().len());
+            }
+
+            let increases = counts.windows(2).filter(|w| w[1] > w[0]).count();
+            assert!(
+                increases >= 2,
+                "events should trickle out over multiple on_event calls, \
+                 but count only increased {} times: {:?}",
+                increases,
+                counts
+            );
+        });
+    }
+
+    #[test]
+    fn smearing_writes_all_events() {
+        let (layer, buf) = capture_layer(1_000, &[("error", 10)]);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..100 {
+                tracing::error!("event");
+            }
+        });
+
+        let lines = buf.lines();
+        assert_eq!(
+            lines.len(),
+            10,
+            "all sampled events should be written on drop"
+        );
+    }
+
+    #[test]
+    fn smearing_preserves_order() {
+        // 50/s * 0.2s = 10 per bucket
+        let (layer, buf) = capture_layer(200, &[("error", 50)]);
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..200 {
+                tracing::error!(i, "seq");
+            }
+            std::thread::sleep(Duration::from_millis(210));
+            for _ in 0..20 {
+                tracing::error!("trigger");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let lines = buf.lines();
+        let numbers: Vec<usize> = lines
+            .iter()
+            .filter_map(|line| {
+                let s = line.rsplit("i=").next()?.trim();
+                s.parse().ok()
+            })
+            .collect();
+
+        assert!(
+            numbers.len() >= 10,
+            "should have at least 10 sequenced events, got {}",
+            numbers.len()
+        );
+
+        for w in numbers.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "smeared events not in arrival order: {} came before {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
 }
