@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::{DefaultFields, Format, Full};
 use tracing_subscriber::fmt::{self, FormatFields, MakeWriter};
@@ -92,6 +93,7 @@ impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
         events
     }
 
+    #[cold]
     fn write_events(&self, events: &[(u64, Vec<u8>)]) {
         if events.is_empty() {
             return;
@@ -135,6 +137,63 @@ impl<S, N, E, W: for<'a> MakeWriter<'a>> SamplingLayer<S, N, E, W> {
         }
     }
 
+    #[cold]
+    fn rotate_bucket(&self, state: &mut State, batch: &mut Vec<(u64, Vec<u8>)>, now: Instant) {
+        batch.extend(state.pending.by_ref());
+        let drained = Self::drain_all(state);
+        state.pending = drained.into_iter();
+        state.bucket_start = now;
+        state.last_release = now;
+    }
+
+    #[inline]
+    fn tick_smear(&self) {
+        let now = Instant::now();
+        let to_write = {
+            let mut state = self.state.lock().unwrap();
+            let mut batch = Self::smear_collect(&mut state, now, self.bucket_duration);
+            if now.duration_since(state.bucket_start) >= self.bucket_duration {
+                self.rotate_bucket(&mut state, &mut batch, now);
+            }
+            batch
+        };
+        self.write_events(&to_write);
+    }
+
+    #[inline]
+    fn match_filters<S2: Subscriber + for<'a> LookupSpan<'a>>(
+        &self,
+        meta: &Metadata<'_>,
+        ctx: &Context<'_, S2>,
+    ) -> u64 {
+        let mut matched: u64 = 0;
+        for (i, filter) in self.filters.iter().enumerate() {
+            if <EnvFilter as tracing_subscriber::Layer<S2>>::enabled(filter, meta, ctx.clone()) {
+                matched |= 1 << i;
+            }
+        }
+        matched
+    }
+
+    #[cold]
+    fn sample_event(&self, bytes: Vec<u8>, matched: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.seq += 1;
+        let mut current = (state.seq, bytes);
+        for (i, reservoir) in state.reservoirs.iter_mut().enumerate() {
+            if matched & (1 << i) == 0 {
+                continue;
+            }
+            current = reservoir.sample(current);
+            if current.1.is_empty() {
+                self.stats.sampled.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        self.stats.dropped.fetch_add(1, Ordering::Relaxed);
+        return_captured(&self.fmt_layer.writer().0, current.1);
+    }
+
     /// Drain all reservoirs and write their contents immediately.
     pub fn flush(&self) {
         let (pending, drained) = {
@@ -157,6 +216,27 @@ impl<S, N, E, W: for<'a> MakeWriter<'a>> Drop for SamplingLayer<S, N, E, W> {
             self.write_events(&pending);
             self.write_events(&drained);
         }
+    }
+}
+
+type FmtLayer<S, N, E> = fmt::Layer<S, N, E, CaptureMakeWriter>;
+
+impl<S, N, E, W> SamplingLayer<S, N, E, W>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+    E: fmt::FormatEvent<S, N> + 'static,
+    W: for<'a> MakeWriter<'a> + 'static,
+{
+    #[inline]
+    fn inner(&self) -> &FmtLayer<S, N, E> {
+        &self.fmt_layer
+    }
+
+    #[inline]
+    fn format_event(&self, event: &Event<'_>, ctx: Context<'_, S>) -> Vec<u8> {
+        self.inner().on_event(event, ctx);
+        take_captured(&self.inner().writer().0)
     }
 }
 
@@ -185,113 +265,55 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let meta = event.metadata();
-        let now = Instant::now();
-
-        let to_write = {
-            let mut state = self.state.lock().unwrap();
-
-            let mut batch = Self::smear_collect(&mut state, now, self.bucket_duration);
-
-            if now.duration_since(state.bucket_start) >= self.bucket_duration {
-                batch.extend(state.pending.by_ref());
-                let drained = Self::drain_all(&mut state);
-                state.pending = drained.into_iter();
-                state.bucket_start = now;
-                state.last_release = now;
-            }
-            batch
-        };
-        self.write_events(&to_write);
-
-        let mut matched: u64 = 0;
-        for (i, filter) in self.filters.iter().enumerate() {
-            if <EnvFilter as tracing_subscriber::Layer<S>>::enabled(filter, meta, ctx.clone()) {
-                matched |= 1 << i;
-            }
-        }
+        let matched = self.match_filters(event.metadata(), &ctx);
         if matched == 0 {
             return;
         }
 
         self.stats.received.fetch_add(1, Ordering::Relaxed);
 
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_event(
-            &self.fmt_layer,
-            event,
-            ctx,
-        );
-        let bytes = take_captured(&self.fmt_layer.writer().0);
+        self.tick_smear();
+
+        let bytes = self.format_event(event, ctx);
         if bytes.is_empty() {
             return;
         }
 
-        let mut state = self.state.lock().unwrap();
-        state.seq += 1;
-        let mut current = (state.seq, bytes);
-        for (i, reservoir) in state.reservoirs.iter_mut().enumerate() {
-            if matched & (1 << i) == 0 {
-                continue;
-            }
-            current = reservoir.sample(current);
-            if current.1.is_empty() {
-                self.stats.sampled.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        }
-        self.stats.dropped.fetch_add(1, Ordering::Relaxed);
-        return_captured(&self.fmt_layer.writer().0, current.1);
+        self.sample_event(bytes, matched);
     }
 
+    #[inline]
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
         id: &tracing::span::Id,
         ctx: Context<'_, S>,
     ) {
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_new_span(
-            &self.fmt_layer,
-            attrs,
-            id,
-            ctx,
-        );
+        self.inner().on_new_span(attrs, id, ctx);
     }
 
+    #[inline]
     fn on_record(
         &self,
         id: &tracing::span::Id,
         values: &tracing::span::Record<'_>,
         ctx: Context<'_, S>,
     ) {
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_record(
-            &self.fmt_layer,
-            id,
-            values,
-            ctx,
-        );
+        self.inner().on_record(id, values, ctx);
     }
 
+    #[inline]
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_enter(
-            &self.fmt_layer,
-            id,
-            ctx,
-        );
+        self.inner().on_enter(id, ctx);
     }
 
+    #[inline]
     fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_exit(
-            &self.fmt_layer,
-            id,
-            ctx,
-        );
+        self.inner().on_exit(id, ctx);
     }
 
+    #[inline]
     fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
-        <fmt::Layer<S, N, E, CaptureMakeWriter> as tracing_subscriber::Layer<S>>::on_close(
-            &self.fmt_layer,
-            id,
-            ctx,
-        );
+        self.inner().on_close(id, ctx);
     }
 }
