@@ -25,6 +25,7 @@ pub struct SamplingLayerBuilder<S, N = DefaultFields, E = Format<Full>, W = fn()
 }
 
 impl<S> SamplingLayer<S> {
+    /// Create a new [`SamplingLayerBuilder`] with default settings.
     pub fn builder() -> SamplingLayerBuilder<S> {
         SamplingLayerBuilder {
             budgets: Vec::new(),

@@ -7,7 +7,7 @@ this layer collects events into fixed-duration time buckets and keeps a statisti
 uniform random sample per bucket. When a spike of logs occurs, you still see a
 representative cross-section rather than just the first N or a biased subset.
 
-![demo](examples/demo.avif)
+![demo](https://raw.githubusercontent.com/conradludgate/tracing-log-sample/main/examples/demo.avif)
 
 ## Features
 

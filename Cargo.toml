@@ -2,6 +2,14 @@
 name = "tracing-log-sample"
 version = "0.1.0"
 edition = "2024"
+authors = ["Conrad Ludgate <conradludgate@gmail.com>"]
+description = "A tracing-subscriber layer that rate-limits log output using reservoir sampling"
+license = "Apache-2.0"
+repository = "https://github.com/conradludgate/tracing-log-sample"
+readme = "README.md"
+keywords = ["tracing", "logging", "sampling", "rate-limit"]
+categories = ["development-tools::debugging"]
+exclude = ["examples/demo.avif"]
 
 [dependencies]
 tracing = "0.1"

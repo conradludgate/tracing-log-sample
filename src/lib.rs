@@ -1,10 +1,14 @@
-//! A [`tracing_subscriber::Layer`] that rate-limits log output using reservoir sampling.
+//! A [`tracing_subscriber::Layer`] that rate-limits log output using
+//! [reservoir sampling](https://en.wikipedia.org/wiki/Reservoir_sampling).
 //!
-//! Events are collected into fixed-duration time buckets and sampled using
-//! Algorithm R, producing a statistically uniform sample per bucket. Multiple
-//! sampling budgets can be configured with [`EnvFilter`](tracing_subscriber::filter::EnvFilter)
+//! Events are collected into fixed-duration time buckets and uniformly sampled,
+//! guaranteeing every event has an equal chance of being kept. Multiple sampling
+//! budgets can be configured with [`EnvFilter`](tracing_subscriber::filter::EnvFilter)
 //! patterns — events displaced from one budget's reservoir cascade to the next
 //! matching budget.
+//!
+//! Sampled events are released gradually over the following bucket via adaptive
+//! smearing, avoiding write bursts at rotation boundaries.
 //!
 //! Formatting is delegated to [`tracing_subscriber::fmt::Layer`], so all the
 //! usual formatting options (compact, pretty, JSON, timestamps, etc.) work
